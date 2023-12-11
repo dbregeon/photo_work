@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS catalog (
+    hash TEXT NOT NULL,
+    path TEXT PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS library (
+    hash TEXT PRIMARY KEY,
+    path TEXT NOT NULL
+);
