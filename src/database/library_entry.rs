@@ -6,9 +6,9 @@ use std::{
 use chrono::{Datelike, NaiveDate};
 use exif::Exif;
 
-use eyre::{eyre, Context, Result};
+use eyre::{eyre, Context, Error, Result};
 
-use super::{catalog::CatalogEntry, common::sha256_digest};
+use super::catalog::CatalogEntry;
 
 pub(crate) struct LibraryEntry {
     pub(super) sha256: String,
@@ -30,20 +30,21 @@ impl LibraryEntry {
 }
 
 impl TryFrom<&CatalogEntry> for LibraryEntry {
-    type Error = eyre::Report;
+    type Error = Error;
 
-    fn try_from(catalog_entry: &CatalogEntry) -> std::prelude::v1::Result<Self, Self::Error> {
+    fn try_from(catalog_entry: &CatalogEntry) -> Result<LibraryEntry> {
         let exif: Exif = read_exif(&catalog_entry.path())?;
         let original_date = original_date(&exif)
             .map_err(|e| eyre!("For {}: {}", catalog_entry.path().display(), e))?;
-        let path_buf = library_path(&catalog_entry.path(), original_date)?;
-        let sha256 = sha256_digest(&path_buf)?;
-        let path = path_buf.canonicalize()?;
-        Ok(Self::new(sha256, path))
+
+        Ok(Self::new(
+            catalog_entry.sha256().to_owned(),
+            find_unused_library_path(&catalog_entry.path(), original_date)?,
+        ))
     }
 }
 
-fn library_path(path: &PathBuf, original_date: NaiveDate) -> Result<PathBuf> {
+fn find_unused_library_path(path: &PathBuf, original_date: NaiveDate) -> Result<PathBuf> {
     let file_stem = path.file_stem().ok_or(eyre!("Expected a file stem"))?;
     let extension = path.extension().ok_or(eyre!("Expected a file extension"))?;
     let date_based_path = date_based_path(original_date);
@@ -61,7 +62,7 @@ fn unused_filename(base_path: &PathBuf, file_stem: &OsStr, extension: &OsStr) ->
             result.set_file_name(name);
             result.set_extension(extension);
         } else {
-            return Err(eyre!("Can't find an used file name in the library."));
+            return Err(eyre!("Can't find an unused file name in the library."));
         }
     }
     Ok(result)
@@ -110,7 +111,7 @@ fn read_exif(path: &PathBuf) -> Result<Exif> {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs::{copy, create_dir_all, remove_dir_all},
+        fs::{copy, create_dir_all, remove_dir_all, remove_file, File},
         path::PathBuf,
     };
 
@@ -120,24 +121,24 @@ mod tests {
 
     use crate::database::{
         catalog::CatalogEntry,
-        common::sha256_digest,
         library_entry::{date_based_path, original_date, read_exif, LibraryEntry},
     };
 
     #[test]
     fn try_from_creates_library_entry_from_path() {
         let catalog_entry =
-            CatalogEntry::try_from(&["Cargo.toml"].iter().collect::<PathBuf>()).unwrap();
+            CatalogEntry::try_from(&given_a_path_for_an_image_with_original_date()).unwrap();
         let entry = LibraryEntry::try_from(&catalog_entry).unwrap();
-        assert_eq!(
-            entry.sha256(),
-            sha256_digest(&PathBuf::from(entry.path())).unwrap()
-        );
+        assert_eq!(entry.sha256(), catalog_entry.sha256());
     }
 
     #[test]
-    fn try_from_fails_to_create_library_entry_from_path() {
-        let catalog_entry = CatalogEntry::try_from(&["/tmp"].iter().collect::<PathBuf>()).unwrap();
+    fn try_from_fails_to_create_library_entry_from_non_existant_path() {
+        let path = ["/tmp", "test.txt"].iter().collect::<PathBuf>();
+        File::create(&path).unwrap();
+        let catalog_entry = CatalogEntry::try_from(&path).unwrap();
+        remove_file(&path).unwrap();
+
         assert!(LibraryEntry::try_from(&catalog_entry).is_err());
     }
 
@@ -146,6 +147,12 @@ mod tests {
         let path: &PathBuf = &given_a_path_for_non_exif_file();
 
         assert!(read_exif(path).is_err());
+    }
+
+    #[test]
+    fn try_from_fails_to_create_library_entry_from_non_exif_file() {
+        let catalog_entry = CatalogEntry::try_from(&given_a_path_for_non_exif_file()).unwrap();
+        assert!(LibraryEntry::try_from(&catalog_entry).is_err());
     }
 
     #[test]
@@ -183,6 +190,7 @@ mod tests {
     fn library_path_is_from_the_original_date_of_the_image() {
         let path = &given_a_path_for_an_image_with_original_date();
         let catalog_entry = CatalogEntry::try_from(path).unwrap();
+        let _ = remove_dir_all(PathBuf::from(2023.to_string()));
 
         assert_eq!(
             &[
@@ -210,12 +218,11 @@ mod tests {
         .iter()
         .collect::<PathBuf>();
 
+        let _ = remove_dir_all(PathBuf::from(2023.to_string()));
         create_dir_all(&occupied_path.parent().unwrap()).unwrap();
         copy(path, &occupied_path).unwrap();
 
         let result = LibraryEntry::try_from(&CatalogEntry::try_from(path).unwrap());
-
-        remove_dir_all(PathBuf::from(2023.to_string())).unwrap();
 
         assert_eq!(
             &[

@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use crate::{
     clapext::SubApplication,
     database::{
-        self, catalog::select_from_catalog, library::library_insert_all,
+        self, catalog::select_from_catalog, common::sha256_digest, library::library_insert_all,
         library_entry::LibraryEntry,
     },
 };
@@ -54,10 +54,7 @@ impl SubApplication for Import {
 fn import(connection: Connection, path_prefix: &str) -> Result<usize> {
     let library_entries = select_from_catalog(&connection, path_prefix)?
         .iter()
-        .map(|e| {
-            LibraryEntry::try_from(e)
-                .and_then(|p| try_copy_catalog_entry(&e.path(), p, &e.sha256()))
-        })
+        .map(|e| LibraryEntry::try_from(e).and_then(|p| try_copy_catalog_entry(&e.path(), p)))
         .filter_map(|r| match r {
             Ok(library_entry) => Some(library_entry),
             Err(e) => {
@@ -69,16 +66,13 @@ fn import(connection: Connection, path_prefix: &str) -> Result<usize> {
     persist_library_entries(connection, library_entries)
 }
 
-fn copy_catalog_entry(
-    from: &PathBuf,
-    library_entry: LibraryEntry,
-    hash: &str,
-) -> Result<LibraryEntry> {
+fn copy_catalog_entry(from: &PathBuf, library_entry: LibraryEntry) -> Result<LibraryEntry> {
     if let Some(dirname) = &library_entry.path().parent() {
         create_dir_all(&dirname)?;
     }
     copy(from, library_entry.path())?;
-    if &hash != &library_entry.sha256() {
+    let copy_sha256 = sha256_digest(&library_entry.path())?;
+    if &library_entry.sha256() != &copy_sha256 {
         Err(eyre!(
             "{} sha256 does not match copied {}. Aborting.",
             from.display(),
@@ -106,11 +100,7 @@ fn persist_library_entries(
     }
 }
 
-fn try_copy_catalog_entry(
-    path: &PathBuf,
-    library_entry: LibraryEntry,
-    hash: &str,
-) -> Result<LibraryEntry> {
+fn try_copy_catalog_entry(path: &PathBuf, library_entry: LibraryEntry) -> Result<LibraryEntry> {
     println!(
         "Importing {} into {}",
         path.display(),
@@ -120,7 +110,7 @@ fn try_copy_catalog_entry(
     if exists {
         Err(eyre!("{} already exists.", library_entry.path().display()))
     } else {
-        copy_catalog_entry(path, library_entry, hash)
+        copy_catalog_entry(path, library_entry)
     }
 }
 
@@ -128,22 +118,24 @@ fn try_copy_catalog_entry(
 mod tests {
     use std::{fs::remove_file, path::PathBuf};
 
+    use serial_test::serial;
+
     use crate::{
         command::import::try_copy_catalog_entry,
-        database::{catalog::CatalogEntry, common::sha256_digest, library_entry::LibraryEntry},
+        database::{catalog::CatalogEntry, library_entry::LibraryEntry},
     };
 
     use super::copy_catalog_entry;
 
     #[test]
+    #[serial]
     fn copy_catalog_entry_copies_file() {
-        let from = &PathBuf::from("Cargo.toml");
-        let catalog_entry = CatalogEntry::try_from(&given_at_target_path("test_file.txt")).unwrap();
+        let catalog_entry =
+            CatalogEntry::try_from(&given_a_path_for_an_image_with_original_date()).unwrap();
         let to = LibraryEntry::try_from(&catalog_entry).unwrap();
-        let hash = &sha256_digest(from).unwrap();
         let path = to.path().clone();
 
-        copy_catalog_entry(from, to, hash).unwrap();
+        copy_catalog_entry(&catalog_entry.path(), to).unwrap();
         assert!(path.exists());
     }
 
@@ -151,39 +143,37 @@ mod tests {
     fn copy_catalog_entry_returns_err_when_hashes_dont_match() {
         let from = &PathBuf::from("Cargo.toml");
         let catalog_entry =
-            CatalogEntry::try_from(&given_at_target_path("copy_catalog_entry.txt")).unwrap();
+            CatalogEntry::try_from(&given_a_path_for_an_image_with_original_date()).unwrap();
         let to = LibraryEntry::try_from(&catalog_entry).unwrap();
-        let hash = &sha256_digest(&PathBuf::from("Cargo.lock")).unwrap();
 
-        assert!(copy_catalog_entry(from, to, hash).is_err());
+        assert!(copy_catalog_entry(from, to).is_err());
     }
 
     #[test]
+    #[serial]
     fn try_copy_catalog_entry_copies_file() {
-        let from = &PathBuf::from("Cargo.toml");
-        let catalog_entry =
-            CatalogEntry::try_from(&given_at_target_path("try_copy_catalog_entry.txt")).unwrap();
+        let from = given_a_path_for_an_image_with_original_date();
+        let catalog_entry = CatalogEntry::try_from(&from).unwrap();
         let to = LibraryEntry::try_from(&catalog_entry).unwrap();
-        let hash = &sha256_digest(from).unwrap();
         let path = to.path().clone();
 
-        try_copy_catalog_entry(from, to, hash).unwrap();
+        let _ = remove_file(&path);
+
+        try_copy_catalog_entry(&from, to).unwrap();
         assert!(path.exists());
     }
 
     #[test]
     fn try_copy_catalog_entry_returns_err_when_path_already_exists() {
         let from = &PathBuf::from("Cargo.toml");
-        let catalog_entry = CatalogEntry::try_from(&given_at_target_path("Cargo.lock")).unwrap();
+        let catalog_entry =
+            CatalogEntry::try_from(&given_a_path_for_an_image_with_original_date()).unwrap();
         let to = LibraryEntry::try_from(&catalog_entry).unwrap();
-        let hash = &sha256_digest(&PathBuf::from("Cargo.lock")).unwrap();
 
-        assert!(try_copy_catalog_entry(from, to, hash).is_err());
+        assert!(try_copy_catalog_entry(from, to).is_err());
     }
 
-    fn given_at_target_path(filename: &str) -> PathBuf {
-        let to = ["target", "tmp", filename].iter().collect();
-        let _ = remove_file(&to);
-        to
+    fn given_a_path_for_an_image_with_original_date() -> PathBuf {
+        ["resources", "test", "kami_neko.jpeg"].iter().collect()
     }
 }
