@@ -10,6 +10,7 @@ use eyre::{eyre, Context, Error, Result};
 
 use super::catalog::CatalogEntry;
 
+#[derive(PartialEq, Debug)]
 pub(crate) struct LibraryEntry {
     pub(super) sha256: String,
     pub(super) path: PathBuf,

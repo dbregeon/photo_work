@@ -137,16 +137,31 @@ mod tests {
 
         copy_catalog_entry(&catalog_entry.path(), to).unwrap();
         assert!(path.exists());
+
+        remove_file(&path).unwrap();
     }
 
     #[test]
     fn copy_catalog_entry_returns_err_when_hashes_dont_match() {
         let from = &PathBuf::from("Cargo.toml");
-        let catalog_entry =
-            CatalogEntry::try_from(&given_a_path_for_an_image_with_original_date()).unwrap();
-        let to = LibraryEntry::try_from(&catalog_entry).unwrap();
+        let actual_library_entry = LibraryEntry::try_from(
+            &CatalogEntry::try_from(&given_a_path_for_an_image_with_original_date()).unwrap(),
+        )
+        .unwrap();
+        let erroneous_entry =
+            LibraryEntry::new("1234".to_string(), actual_library_entry.path().to_owned());
 
-        assert!(copy_catalog_entry(from, to).is_err());
+        let error = copy_catalog_entry(from, erroneous_entry)
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "Cargo.toml sha256 does not match copied {}. Aborting.",
+                actual_library_entry.path().to_string_lossy().to_string()
+            )
+        );
     }
 
     #[test]
@@ -166,11 +181,10 @@ mod tests {
     #[test]
     fn try_copy_catalog_entry_returns_err_when_path_already_exists() {
         let from = &PathBuf::from("Cargo.toml");
-        let catalog_entry =
-            CatalogEntry::try_from(&given_a_path_for_an_image_with_original_date()).unwrap();
-        let to = LibraryEntry::try_from(&catalog_entry).unwrap();
+        let to = LibraryEntry::new("1234".to_string(), PathBuf::from("Cargo.toml"));
 
-        assert!(try_copy_catalog_entry(from, to).is_err());
+        let error = try_copy_catalog_entry(from, to).err().unwrap().to_string();
+        assert_eq!(error, "Cargo.toml already exists.");
     }
 
     fn given_a_path_for_an_image_with_original_date() -> PathBuf {
