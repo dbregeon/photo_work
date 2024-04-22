@@ -10,8 +10,8 @@ use rusqlite::Connection;
 use crate::{
     clapext::SubApplication,
     database::{
-        self, catalog::select_from_catalog, common::sha256_digest, library::library_insert_all,
-        library_entry::LibraryEntry,
+        self, catalog::select_from_catalog, common::sha256_digest,
+        library::persist_library_entries, library_entry::LibraryEntry,
     },
 };
 
@@ -51,7 +51,7 @@ impl SubApplication for Import {
     }
 }
 
-fn import(connection: Connection, path_prefix: &str) -> Result<usize> {
+fn import(mut connection: Connection, path_prefix: &str) -> Result<usize> {
     let library_entries = select_from_catalog(&connection, path_prefix)?
         .iter()
         .map(|e| LibraryEntry::try_from(e).and_then(|p| try_copy_catalog_entry(&e.path(), p)))
@@ -63,7 +63,21 @@ fn import(connection: Connection, path_prefix: &str) -> Result<usize> {
             }
         })
         .collect::<Vec<LibraryEntry>>();
-    persist_library_entries(connection, library_entries)
+    persist_library_entries(&mut connection, library_entries)
+}
+
+fn try_copy_catalog_entry(path: &PathBuf, library_entry: LibraryEntry) -> Result<LibraryEntry> {
+    println!(
+        "Importing {} into {}",
+        path.display(),
+        library_entry.path().display()
+    );
+    let exists = library_entry.path().exists();
+    if exists {
+        Err(eyre!("{} already exists.", library_entry.path().display()))
+    } else {
+        copy_catalog_entry(path, library_entry)
+    }
 }
 
 fn copy_catalog_entry(from: &PathBuf, library_entry: LibraryEntry) -> Result<LibraryEntry> {
@@ -80,37 +94,6 @@ fn copy_catalog_entry(from: &PathBuf, library_entry: LibraryEntry) -> Result<Lib
         ))
     } else {
         Ok(library_entry)
-    }
-}
-
-fn persist_library_entries(
-    mut connection: Connection,
-    entries: Vec<LibraryEntry>,
-) -> Result<usize> {
-    let mut transaction = connection.transaction()?;
-    let db_count = library_insert_all(&mut transaction, &entries)?;
-    if db_count == entries.len() {
-        transaction.commit()?;
-        Ok(db_count)
-    } else {
-        transaction.rollback()?;
-        Err(eyre!(
-            "Database insert count does not match files copied. Files left in place."
-        ))
-    }
-}
-
-fn try_copy_catalog_entry(path: &PathBuf, library_entry: LibraryEntry) -> Result<LibraryEntry> {
-    println!(
-        "Importing {} into {}",
-        path.display(),
-        library_entry.path().display()
-    );
-    let exists = library_entry.path().exists();
-    if exists {
-        Err(eyre!("{} already exists.", library_entry.path().display()))
-    } else {
-        copy_catalog_entry(path, library_entry)
     }
 }
 
