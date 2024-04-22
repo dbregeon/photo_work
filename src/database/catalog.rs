@@ -35,10 +35,21 @@ impl TryFrom<&PathBuf> for CatalogEntry {
     }
 }
 
-pub(crate) fn catalog_insert_all(
-    transaction: &mut Transaction,
-    entries: &Vec<CatalogEntry>,
+pub(crate) fn persist_catalog_entries(
+    connection: &mut Connection,
+    entries: Vec<CatalogEntry>,
 ) -> Result<usize> {
+    let mut tx = connection.transaction()?;
+    match catalog_insert_all(&mut tx, &entries) {
+        Ok(count) => {
+            tx.commit()?;
+            Ok(count)
+        }
+        e => e,
+    }
+}
+
+fn catalog_insert_all(transaction: &mut Transaction, entries: &Vec<CatalogEntry>) -> Result<usize> {
     let mut count = 0;
     let mut statement = transaction.prepare("INSERT INTO catalog (hash, path) values (?1, ?2)")?;
     for CatalogEntry { sha256, path } in entries {
@@ -76,7 +87,7 @@ mod tests {
         catalog::catalog_insert_all, common::sha256_digest, library_entry::LibraryEntry, migrate,
     };
 
-    use super::{select_from_catalog, CatalogEntry};
+    use super::{persist_catalog_entries, select_from_catalog, CatalogEntry};
 
     fn catalog_contains(connection: &mut Connection, entry: &CatalogEntry) -> bool {
         match connection.query_row(
@@ -184,6 +195,46 @@ mod tests {
         assert!(catalog_insert_all(&mut transaction, &entries).is_err());
         transaction.rollback().unwrap();
         assert!(!catalog_contains(&mut connection, &entries[1]));
+    }
+
+    #[test]
+    fn persist_catalog_entries_rollbacks_on_error() {
+        let mut connection = connection();
+        let entries = vec![
+            CatalogEntry {
+                sha256: "1".to_string(),
+                path: "a".to_string(),
+            },
+            CatalogEntry {
+                sha256: "2".to_string(),
+                path: "b".to_string(),
+            },
+        ];
+        connection
+            .execute(
+                "INSERT INTO catalog (hash, path) values (?1, ?2)",
+                params!(&entries[0].sha256, &entries[0].path),
+            )
+            .unwrap();
+        let result = persist_catalog_entries(&mut connection, entries);
+        assert!(catalog_contains(
+            &mut connection,
+            &CatalogEntry {
+                sha256: "1".to_string(),
+                path: "a".to_string(),
+            }
+        ));
+        assert!(!catalog_contains(
+            &mut connection,
+            &CatalogEntry {
+                sha256: "2".to_string(),
+                path: "b".to_string(),
+            }
+        ));
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "UNIQUE constraint failed: catalog.path".to_string()
+        );
     }
 
     #[test]

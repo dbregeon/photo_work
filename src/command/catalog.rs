@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 
 use crate::{
     clapext::SubApplication,
-    database::catalog::{catalog_insert_all, CatalogEntry},
+    database::catalog::{persist_catalog_entries, CatalogEntry},
 };
 
 const CATALOG: &str = "catalog";
@@ -45,7 +45,7 @@ impl SubApplication for Catalog {
     }
 }
 
-fn catalog(connection: Connection, path: &PathBuf) -> Result<usize> {
+fn catalog(mut connection: Connection, path: &PathBuf) -> Result<usize> {
     let entries = WalkDir::new(&PathBuf::from(path))
         .into_iter()
         .filter_entry(|e| !is_hidden_file_name(e.file_name()))
@@ -60,24 +60,7 @@ fn catalog(connection: Connection, path: &PathBuf) -> Result<usize> {
         })
         .filter_map(|e: Result<CatalogEntry, eyre::Error>| e.ok())
         .collect::<Vec<CatalogEntry>>();
-    persist_catalog_entries(connection, entries)
-}
-
-fn persist_catalog_entries(
-    mut connection: Connection,
-    entries: Vec<CatalogEntry>,
-) -> Result<usize> {
-    let mut tx = connection.transaction()?;
-    match catalog_insert_all(&mut tx, &entries) {
-        Ok(count) => {
-            tx.commit()?;
-            Ok(count)
-        }
-        e => {
-            tx.rollback()?;
-            e
-        }
-    }
+    persist_catalog_entries(&mut connection, entries)
 }
 
 /// Returns true when a file_name starts with '.'
