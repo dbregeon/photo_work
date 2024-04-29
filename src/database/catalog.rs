@@ -121,6 +121,23 @@ where
     }
 }
 
+pub(crate) fn find_already_imported(connection: &Connection) -> Result<Vec<CatalogEntry>> {
+    let mut statement = connection.prepare(
+        "SELECT catalog.hash, catalog.path FROM catalog, library WHERE catalog.hash = library.hash",
+    )?;
+    let results = statement
+        .query_map([], |row| {
+            Ok(CatalogEntry {
+                sha256: row.get(0)?,
+                path: row.get(1)?,
+            })
+        })?
+        .collect::<Vec<Result<CatalogEntry, rusqlite::Error>>>();
+    Ok(results
+        .into_iter()
+        .collect::<Result<Vec<CatalogEntry>, rusqlite::Error>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

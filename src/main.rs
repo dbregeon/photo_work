@@ -24,8 +24,7 @@ impl PhotoWorks {
         let command = Command::new("photo_works")
             .about("A photo management CLI")
             .subcommand_required(true)
-            .arg_required_else_help(true)
-            .allow_external_subcommands(true);
+            .arg_required_else_help(true);
         self.sub_commands.enrich_command(command)
     }
 
