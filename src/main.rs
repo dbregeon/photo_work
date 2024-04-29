@@ -2,7 +2,7 @@ use std::ffi::OsString;
 
 use clap::Command;
 use clapext::{SubApplication, SubCommandHolder};
-use command::{catalog, import, init};
+use command::{catalog, check, import, init};
 use eyre::Result;
 
 mod clapext;
@@ -49,6 +49,7 @@ fn app() -> PhotoWorks {
         .register(init::Init)
         .register(catalog::Catalog)
         .register(import::Import)
+        .register(check::Check)
 }
 
 fn main() -> Result<()> {

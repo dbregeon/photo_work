@@ -60,7 +60,7 @@ fn catalog(mut connection: Connection, path: &PathBuf) -> Result<usize> {
         })
         .filter_map(|e: Result<CatalogEntry, eyre::Error>| e.ok())
         .collect::<Vec<CatalogEntry>>();
-    persist_catalog_entries(&mut connection, entries)
+    persist_catalog_entries(&mut connection, &entries)
 }
 
 /// Returns true when a file_name starts with '.'

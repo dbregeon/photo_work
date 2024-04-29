@@ -63,7 +63,7 @@ fn import(mut connection: Connection, path_prefix: &str) -> Result<usize> {
             }
         })
         .collect::<Vec<LibraryEntry>>();
-    persist_library_entries(&mut connection, library_entries)
+    persist_library_entries(&mut connection, &library_entries)
 }
 
 fn try_copy_catalog_entry(path: &PathBuf, library_entry: LibraryEntry) -> Result<LibraryEntry> {

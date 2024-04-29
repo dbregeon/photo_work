@@ -37,7 +37,7 @@ mod tests {
         let mut rows = statement.query(params!(table_name)).unwrap();
         let count = rows.next().unwrap().unwrap();
 
-        1 == count.get(0).unwrap()
+        1 == count.get::<_, usize>(0).unwrap()
     }
 
     #[test]
