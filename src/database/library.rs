@@ -1,5 +1,5 @@
 use eyre::{eyre, Result};
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, Statement, Transaction};
 
 use super::library_entry::LibraryEntry;
 
@@ -8,33 +8,28 @@ pub(crate) fn persist_library_entries(
     entries: &Vec<LibraryEntry>,
 ) -> Result<usize> {
     let mut transaction = connection.transaction()?;
-    match library_insert_all(&mut transaction, entries) {
-        Ok(db_count) if db_count == entries.len() => {
-            transaction.commit()?;
-            Ok(db_count)
-        }
-        _ => Err(eyre!(
-            "Database insert count does not match files copied. Files left in place."
-        )),
-    }
+    let count = library_insert_all(&mut transaction, entries)?;
+    assert!(count == entries.len());
+    transaction.commit()?;
+    Ok(count)
 }
 
 fn library_insert_all(transaction: &mut Transaction, entries: &Vec<LibraryEntry>) -> Result<usize> {
     let mut count = 0;
     let mut statement = transaction.prepare("INSERT INTO library (hash, path) values (?1, ?2)")?;
     for entry in entries {
-        count += statement
-            .execute([entry.sha256(), &entry.path().to_string_lossy().to_string()])
-            .map_err(|e| {
-                eyre!(
-                    "Failed to insert ({}, {}): {}",
-                    &entry.sha256(),
-                    &entry.path().display(),
-                    e
-                )
-            })?;
+        count += library_insert(&mut statement, entry)?;
     }
     Ok(count)
+}
+
+fn library_insert(
+    statement: &mut Statement,
+    LibraryEntry { sha256, path }: &LibraryEntry,
+) -> Result<usize> {
+    statement
+        .execute([sha256, &path.to_string_lossy().to_string()])
+        .map_err(|e| eyre!("Failed to insert ({}, {}): {}", sha256, path.display(), e))
 }
 
 pub(crate) fn foreach_entry<F>(connection: &Connection, mut f: F) -> Result<usize>
@@ -109,11 +104,8 @@ mod tests {
         connection
     }
 
-    #[test]
-    fn library_insert_all_returns_count_of_insertions() {
-        let mut connection = new_database();
-        let mut transaction = connection.transaction().unwrap();
-        let entries = vec![
+    fn some_entries() -> Vec<LibraryEntry> {
+        vec![
             LibraryEntry {
                 sha256: "1".to_string(),
                 path: PathBuf::from("a"),
@@ -122,7 +114,15 @@ mod tests {
                 sha256: "2".to_string(),
                 path: PathBuf::from("b"),
             },
-        ];
+        ]
+    }
+
+    #[test]
+    fn library_insert_all_returns_count_of_insertions() {
+        let entries = some_entries();
+        let mut connection = new_database();
+        let mut transaction = connection.transaction().unwrap();
+
         assert_eq!(
             entries.len(),
             library_insert_all(&mut transaction, &entries).unwrap()
@@ -131,19 +131,10 @@ mod tests {
 
     #[test]
     fn library_insert_all_inserts_into_the_library_table() {
+        let entries = some_entries();
         let mut connection = new_database();
-
         let mut transaction = connection.transaction().unwrap();
-        let entries: Vec<_> = vec![
-            LibraryEntry {
-                sha256: "1".to_string(),
-                path: PathBuf::from("a"),
-            },
-            LibraryEntry {
-                sha256: "2".to_string(),
-                path: PathBuf::from("b"),
-            },
-        ];
+
         library_insert_all(&mut transaction, &entries).unwrap();
         transaction.commit().unwrap();
 
@@ -153,17 +144,9 @@ mod tests {
 
     #[test]
     fn library_insert_all_results_in_error_when_one_is_duplicate() {
+        let entries = some_entries();
         let mut connection = new_database();
-        let entries = vec![
-            LibraryEntry {
-                sha256: "1".to_string(),
-                path: PathBuf::from("a"),
-            },
-            LibraryEntry {
-                sha256: "2".to_string(),
-                path: PathBuf::from("b"),
-            },
-        ];
+
         connection
             .execute(
                 "INSERT INTO library (hash, path) values (?1, ?2)",
@@ -181,17 +164,8 @@ mod tests {
 
     #[test]
     fn persist_library_entries_rollbacks_when_insert_fails() {
+        let entries = some_entries();
         let mut connection = new_database();
-        let entries = vec![
-            LibraryEntry {
-                sha256: "1".to_string(),
-                path: PathBuf::from("a"),
-            },
-            LibraryEntry {
-                sha256: "2".to_string(),
-                path: PathBuf::from("b"),
-            },
-        ];
         connection
             .execute(
                 "INSERT INTO library (hash, path) values (?1, ?2)",
@@ -204,13 +178,6 @@ mod tests {
 
         let result = persist_library_entries(&mut connection, &entries);
 
-        assert!(library_contains(
-            &mut connection,
-            &LibraryEntry {
-                sha256: "1".to_string(),
-                path: PathBuf::from("a"),
-            }
-        ));
         assert!(!library_contains(
             &mut connection,
             &LibraryEntry {
@@ -220,22 +187,13 @@ mod tests {
         ));
         assert_eq!(
             result.err().unwrap().to_string(),
-            "Database insert count does not match files copied. Files left in place.".to_string()
+            "Failed to insert (1, a): UNIQUE constraint failed: library.hash".to_string()
         );
     }
 
     #[test]
     fn foreach_entry_applies_the_function_to_each_entry() {
-        let entries = vec![
-            LibraryEntry {
-                sha256: "1".to_string(),
-                path: PathBuf::from("a"),
-            },
-            LibraryEntry {
-                sha256: "2".to_string(),
-                path: PathBuf::from("b"),
-            },
-        ];
+        let entries = some_entries();
         let mut connection = new_database_containing(&entries);
         let mut entry_hashes = vec![];
         let iterated_count = foreach_entry(&mut connection, |e| {
@@ -261,17 +219,7 @@ mod tests {
 
     #[test]
     fn foreach_entry_returns_error_when_parameter_function_does() {
-        let entries = vec![
-            LibraryEntry {
-                sha256: "1".to_string(),
-                path: PathBuf::from("a"),
-            },
-            LibraryEntry {
-                sha256: "2".to_string(),
-                path: PathBuf::from("b"),
-            },
-        ];
-        let connection = new_database_containing(&entries);
+        let connection = new_database_containing(&some_entries());
         assert_eq!(
             "invalid entry",
             foreach_entry(&connection, |e| if e.sha256() == "1" {

@@ -105,7 +105,7 @@ mod tests {
 
     use crate::{
         command::import::try_copy_catalog_entry,
-        database::{catalog::CatalogEntry, library_entry::LibraryEntry},
+        database::{catalog_entry::CatalogEntry, library_entry::LibraryEntry},
     };
 
     use super::copy_catalog_entry;

@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 
 use crate::{
     clapext::SubApplication,
-    database::catalog::{persist_catalog_entries, CatalogEntry},
+    database::{catalog::persist_catalog_entries, catalog_entry::CatalogEntry},
 };
 
 const CATALOG: &str = "catalog";

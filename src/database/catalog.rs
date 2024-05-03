@@ -1,61 +1,35 @@
-use std::path::PathBuf;
+use eyre::{eyre, Result};
+use rusqlite::{params, Connection, Params, Statement, Transaction};
 
-use eyre::{eyre, Context, Result};
-use rusqlite::{params, Connection, Transaction};
-
-use super::common::sha256_digest;
-
-#[derive(PartialEq, Debug)]
-pub(crate) struct CatalogEntry {
-    sha256: String,
-    path: String,
-}
-
-impl CatalogEntry {
-    pub(crate) fn new(sha256: String, path: String) -> Self {
-        Self { sha256, path }
-    }
-
-    pub(crate) fn sha256(&self) -> &str {
-        &self.sha256
-    }
-
-    pub(crate) fn path(&self) -> PathBuf {
-        PathBuf::from(&self.path)
-    }
-}
-
-impl TryFrom<&PathBuf> for CatalogEntry {
-    type Error = eyre::Report;
-
-    fn try_from(path_buf: &PathBuf) -> std::prelude::v1::Result<Self, Self::Error> {
-        let sha256 = sha256_digest(&path_buf)?;
-        let path = path_buf.canonicalize()?;
-        Ok(Self::new(sha256, path.to_string_lossy().to_string()))
-    }
-}
+use super::catalog_entry::CatalogEntry;
 
 pub(crate) fn persist_catalog_entries(
     connection: &mut Connection,
     entries: &Vec<CatalogEntry>,
 ) -> Result<usize> {
-    let mut tx = connection.transaction()?;
-    match catalog_insert_all(&mut tx, entries) {
-        Ok(count) => {
-            tx.commit()?;
-            Ok(count)
-        }
-        e => e,
-    }
+    let mut transaction = connection.transaction()?;
+    let count = catalog_insert_all(&mut transaction, entries)?;
+    assert!(count == entries.len());
+    transaction.commit()?;
+    Ok(count)
 }
 
 fn catalog_insert_all(transaction: &mut Transaction, entries: &Vec<CatalogEntry>) -> Result<usize> {
     let mut count = 0;
     let mut statement = transaction.prepare("INSERT INTO catalog (hash, path) values (?1, ?2)")?;
-    for CatalogEntry { sha256, path } in entries {
-        count += statement.execute([sha256, path])?;
+    for entry in entries {
+        count += catalog_insert(&mut statement, entry)?;
     }
     Ok(count)
+}
+
+fn catalog_insert(
+    statement: &mut Statement,
+    CatalogEntry { sha256, path }: &CatalogEntry,
+) -> Result<usize> {
+    statement
+        .execute([sha256, path])
+        .map_err(|e| eyre!("Failed to insert ({}, {}): {}", sha256, path, e))
 }
 
 pub(crate) fn select_from_catalog(
@@ -63,54 +37,25 @@ pub(crate) fn select_from_catalog(
     path_prefix: &str,
 ) -> Result<Vec<CatalogEntry>> {
     let mut statement = connection.prepare("SELECT catalog.hash, catalog.path FROM catalog LEFT JOIN library ON catalog.hash = library.hash WHERE catalog.path like ?1 AND library.hash IS NULL GROUP BY catalog.hash")?;
-    let results = statement
-        .query_map(params!([path_prefix, "%"].join("")), |row| {
-            Ok(CatalogEntry {
-                sha256: row.get(0)?,
-                path: row.get(1)?,
-            })
-        })?
-        .collect::<Vec<Result<CatalogEntry, rusqlite::Error>>>();
-    results
-        .into_iter()
-        .collect::<Result<Vec<CatalogEntry>, rusqlite::Error>>()
-        .wrap_err_with(|| format!("Failed to read catalog for path {}", path_prefix))
+    query(&mut statement, params!([path_prefix, "%"].join("")))
 }
 
 pub(crate) fn find_duplicates(connection: &Connection) -> Result<Vec<CatalogEntry>> {
-    let mut statement = connection.prepare("SELECT catalog.hash, catalog.path FROM catalog GROUP BY catalog.hash HAVING COUNT(catalog.path) > 1 ORDER BY catalog.hash")?;
-    let results = statement
-        .query_map([], |row| {
-            Ok(CatalogEntry {
-                sha256: row.get(0)?,
-                path: row.get(1)?,
-            })
-        })?
-        .collect::<Vec<Result<CatalogEntry, rusqlite::Error>>>();
-    Ok(results
-        .into_iter()
-        .collect::<Result<Vec<CatalogEntry>, rusqlite::Error>>()?)
+    let mut statement = connection.prepare("SELECT catalog.hash, catalog.path FROM catalog WHERE catalog.hash in (SELECT hash FROM catalog GROUP BY hash HAVING COUNT(path) > 1 ORDER BY hash)")?;
+    query(&mut statement, [])
 }
 
 pub(crate) fn foreach_entry<F>(connection: &Connection, mut f: F) -> Result<usize>
 where
     F: FnMut(CatalogEntry) -> Result<()>,
 {
-    let mut query = connection.prepare("SELECT hash, path FROM catalog")?;
-    let entries = query.query_map([], |r| {
-        Ok(CatalogEntry::new(
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?.into(),
-        ))
-    })?;
+    let mut statement = connection.prepare("SELECT catalog.hash, catalog.path FROM catalog")?;
+    let entries = query(&mut statement, [])?;
     let mut count = 0;
     let mut errors = vec![];
-    for entry_mapping_result in entries {
-        match entry_mapping_result {
-            Ok(entry) => match f(entry) {
-                Ok(()) => count += 1,
-                Err(e) => errors.push(e.to_string()),
-            },
+    for entry in entries {
+        match f(entry) {
+            Ok(()) => count += 1,
             Err(e) => errors.push(e.to_string()),
         }
     }
@@ -125,17 +70,15 @@ pub(crate) fn find_already_imported(connection: &Connection) -> Result<Vec<Catal
     let mut statement = connection.prepare(
         "SELECT catalog.hash, catalog.path FROM catalog, library WHERE catalog.hash = library.hash",
     )?;
-    let results = statement
-        .query_map([], |row| {
-            Ok(CatalogEntry {
-                sha256: row.get(0)?,
-                path: row.get(1)?,
-            })
-        })?
-        .collect::<Vec<Result<CatalogEntry, rusqlite::Error>>>();
-    Ok(results
+    query(&mut statement, [])
+}
+
+fn query<T: Params>(statement: &mut Statement, params: T) -> Result<Vec<CatalogEntry>> {
+    let result = statement
+        .query_map(params, |r| CatalogEntry::try_from(r))?
         .into_iter()
-        .collect::<Result<Vec<CatalogEntry>, rusqlite::Error>>()?)
+        .collect::<Result<Vec<CatalogEntry>, rusqlite::Error>>()?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -146,14 +89,15 @@ mod tests {
     use rusqlite::{params, Connection};
 
     use crate::database::{
-        catalog::{catalog_insert_all, foreach_entry},
-        common::sha256_digest,
+        catalog::{catalog_insert_all, foreach_entry, query},
         library::persist_library_entries,
         library_entry::LibraryEntry,
         migrate,
     };
 
-    use super::{persist_catalog_entries, select_from_catalog, CatalogEntry};
+    use super::{
+        find_already_imported, persist_catalog_entries, select_from_catalog, CatalogEntry,
+    };
 
     fn catalog_contains(connection: &mut Connection, entry: &CatalogEntry) -> bool {
         match connection.query_row(
@@ -182,20 +126,25 @@ mod tests {
         connection
     }
 
-    #[test]
-    fn catalog_insert_all_returns_count_of_insertions() {
-        let mut connection = new_database();
-        let mut transaction = connection.transaction().unwrap();
-        let entries = vec![
+    fn some_entries() -> Vec<CatalogEntry> {
+        vec![
             CatalogEntry {
                 sha256: "1".to_string(),
-                path: "a".to_string(),
+                path: "a/a".to_string(),
             },
             CatalogEntry {
                 sha256: "2".to_string(),
-                path: "b".to_string(),
+                path: "a/b".to_string(),
             },
-        ];
+        ]
+    }
+
+    #[test]
+    fn catalog_insert_all_returns_count_of_insertions() {
+        let entries = some_entries();
+        let mut connection = new_database();
+        let mut transaction = connection.transaction().unwrap();
+
         assert_eq!(
             entries.len(),
             catalog_insert_all(&mut transaction, &entries).unwrap()
@@ -204,19 +153,11 @@ mod tests {
 
     #[test]
     fn catalog_insert_all_inserts_into_the_catalog_table() {
-        let mut connection = new_database();
+        let entries = some_entries();
 
+        let mut connection = new_database();
         let mut transaction = connection.transaction().unwrap();
-        let entries = vec![
-            CatalogEntry {
-                sha256: "1".to_string(),
-                path: "a".to_string(),
-            },
-            CatalogEntry {
-                sha256: "2".to_string(),
-                path: "b".to_string(),
-            },
-        ];
+
         catalog_insert_all(&mut transaction, &entries).unwrap();
         transaction.commit().unwrap();
 
@@ -226,17 +167,9 @@ mod tests {
 
     #[test]
     fn catalog_insert_all_results_in_error_when_one_is_duplicate() {
+        let entries = some_entries();
+
         let mut connection = new_database();
-        let entries = vec![
-            CatalogEntry {
-                sha256: "1".to_string(),
-                path: "a".to_string(),
-            },
-            CatalogEntry {
-                sha256: "2".to_string(),
-                path: "b".to_string(),
-            },
-        ];
         connection
             .execute(
                 "INSERT INTO catalog (hash, path) values (?1, ?2)",
@@ -251,17 +184,8 @@ mod tests {
 
     #[test]
     fn persist_catalog_entries_rollbacks_on_error() {
+        let entries = some_entries();
         let mut connection = new_database();
-        let entries = vec![
-            CatalogEntry {
-                sha256: "1".to_string(),
-                path: "a".to_string(),
-            },
-            CatalogEntry {
-                sha256: "2".to_string(),
-                path: "b".to_string(),
-            },
-        ];
         connection
             .execute(
                 "INSERT INTO catalog (hash, path) values (?1, ?2)",
@@ -269,13 +193,6 @@ mod tests {
             )
             .unwrap();
         let result = persist_catalog_entries(&mut connection, &entries);
-        assert!(catalog_contains(
-            &mut connection,
-            &CatalogEntry {
-                sha256: "1".to_string(),
-                path: "a".to_string(),
-            }
-        ));
         assert!(!catalog_contains(
             &mut connection,
             &CatalogEntry {
@@ -285,36 +202,15 @@ mod tests {
         ));
         assert_eq!(
             result.err().unwrap().to_string(),
-            "UNIQUE constraint failed: catalog.path".to_string()
+            "Failed to insert (1, a/a): UNIQUE constraint failed: catalog.path".to_string()
         );
     }
 
     #[test]
-    fn try_from_creates_catalog_entry_from_path() {
-        let path: PathBuf = ["Cargo.toml"].iter().collect();
-        let CatalogEntry { sha256, path } = CatalogEntry::try_from(&path).unwrap();
-        assert_eq!(sha256, sha256_digest(&PathBuf::from(path)).unwrap());
-    }
-
-    #[test]
-    fn try_from_fails_to_create_catalog_entry_from_path() {
-        let path = ["/tmp"].iter().collect();
-        assert!(CatalogEntry::try_from(&path).is_err());
-    }
-
-    #[test]
     fn select_from_catalog_returns_the_catalog_entries() {
+        let entries = some_entries();
         let mut connection = new_database();
-        let entries = vec![
-            CatalogEntry {
-                sha256: "1".to_string(),
-                path: "a/a".to_string(),
-            },
-            CatalogEntry {
-                sha256: "2".to_string(),
-                path: "a/b".to_string(),
-            },
-        ];
+
         persist_catalog_entries(&mut connection, &entries).unwrap();
         let results = select_from_catalog(&connection, "a").unwrap();
         assert_eq!(entries, results);
@@ -322,17 +218,9 @@ mod tests {
 
     #[test]
     fn select_from_catalog_does_not_return_entries_in_library() {
+        let entries = some_entries();
         let mut connection = new_database();
-        let entries = vec![
-            CatalogEntry {
-                sha256: "1".to_string(),
-                path: "a/a".to_string(),
-            },
-            CatalogEntry {
-                sha256: "2".to_string(),
-                path: "a/b".to_string(),
-            },
-        ];
+
         let expected_results = vec![CatalogEntry {
             sha256: "2".to_string(),
             path: "a/b".to_string(),
@@ -349,7 +237,6 @@ mod tests {
 
     #[test]
     fn select_from_catalog_does_not_return_duplicate_hash_entries() {
-        let mut connection = new_database();
         let entries = vec![
             CatalogEntry {
                 sha256: "1".to_string(),
@@ -360,6 +247,8 @@ mod tests {
                 path: "a/b".to_string(),
             },
         ];
+        let mut connection = new_database();
+
         persist_catalog_entries(&mut connection, &entries).unwrap();
         let results = select_from_catalog(&connection, "a").unwrap();
         assert_eq!(1, results.len());
@@ -367,16 +256,8 @@ mod tests {
 
     #[test]
     fn foreach_entry_applies_the_function_to_each_entry() {
-        let entries = vec![
-            CatalogEntry {
-                sha256: "1".to_string(),
-                path: "a/a".to_string(),
-            },
-            CatalogEntry {
-                sha256: "2".to_string(),
-                path: "a/b".to_string(),
-            },
-        ];
+        let entries = some_entries();
+
         let mut connection = new_database_containing(&entries);
         let mut entry_hashes = vec![];
         let iterated_count = foreach_entry(&mut connection, |e| {
@@ -389,29 +270,9 @@ mod tests {
     }
 
     #[test]
-    fn foreach_entry_returns_error_when_query_fails() {
-        let connection = new_connection();
-        assert_eq!(
-            "no such table: catalog",
-            foreach_entry(&connection, |_e| Ok(()))
-                .err()
-                .unwrap()
-                .to_string()
-        )
-    }
-
-    #[test]
     fn foreach_entry_returns_error_when_parameter_function_does() {
-        let entries = vec![
-            CatalogEntry {
-                sha256: "1".to_string(),
-                path: "a/a".to_string(),
-            },
-            CatalogEntry {
-                sha256: "2".to_string(),
-                path: "a/b".to_string(),
-            },
-        ];
+        let entries = some_entries();
+
         let connection = new_database_containing(&entries);
         assert_eq!(
             "invalid entry",
@@ -427,7 +288,19 @@ mod tests {
     }
 
     #[test]
-    fn foreach_entry_returns_error_when_row_cannot_be_converted_to_entry() {
+    fn foreach_entry_returns_error_when_statement_is_incorrect() {
+        let connection = new_connection();
+        assert_eq!(
+            "no such table: catalog",
+            foreach_entry(&connection, |_e| Ok(()))
+                .err()
+                .unwrap()
+                .to_string()
+        )
+    }
+
+    #[test]
+    fn query_returns_error_when_row_cannot_be_converted_to_entry() {
         let connection = new_connection();
         connection
             .execute("create table catalog (hash integer, path string)", [])
@@ -439,12 +312,51 @@ mod tests {
             )
             .unwrap();
 
+        let mut statement = connection
+            .prepare("SELECT catalog.hash, catalog.path FROM catalog")
+            .unwrap();
+
         assert_eq!(
             "Invalid column type Integer at index: 0, name: hash",
-            foreach_entry(&connection, |_e| Ok(()))
-                .err()
-                .unwrap()
-                .to_string()
+            query(&mut statement, []).err().unwrap().to_string()
         )
+    }
+
+    #[test]
+    fn find_already_imported_returns_all_catalog_entries_also_in_library() {
+        let mut entries = some_entries();
+        entries.push(CatalogEntry::new(
+            entries[0].sha256.to_owned(),
+            "c/cc".to_string(),
+        ));
+
+        let mut connection = new_database_containing(&entries);
+        persist_library_entries(
+            &mut connection,
+            &vec![LibraryEntry::new(
+                entries[0].sha256.to_owned(),
+                PathBuf::from("a/aa"),
+            )],
+        )
+        .unwrap();
+
+        let result = find_already_imported(&connection).unwrap();
+        assert_eq!(2, result.len());
+        assert_eq!(entries[0], result[0]);
+        assert_eq!(entries[2], result[1]);
+    }
+
+    #[test]
+    fn find_already_imported_does_not_return_catalog_entries_with_no_matching_library_entries() {
+        let entries = some_entries();
+
+        let mut connection = new_database_containing(&entries);
+        persist_library_entries(
+            &mut connection,
+            &vec![LibraryEntry::new("12".to_string(), PathBuf::from("a/aa"))],
+        )
+        .unwrap();
+
+        assert!(find_already_imported(&connection).unwrap().is_empty());
     }
 }

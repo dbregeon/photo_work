@@ -5,6 +5,7 @@ use refinery::{Error, Report};
 use rusqlite::Connection;
 
 pub(crate) mod catalog;
+pub(crate) mod catalog_entry;
 pub(crate) mod common;
 pub(crate) mod library;
 pub(crate) mod library_entry;

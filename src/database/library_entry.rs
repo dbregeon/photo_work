@@ -8,7 +8,7 @@ use exif::Exif;
 
 use eyre::{eyre, Context, Error, Result};
 
-use super::catalog::CatalogEntry;
+use super::catalog_entry::CatalogEntry;
 
 #[derive(PartialEq, Debug)]
 pub(crate) struct LibraryEntry {
@@ -121,7 +121,7 @@ mod tests {
     use serial_test::serial;
 
     use crate::database::{
-        catalog::CatalogEntry,
+        catalog_entry::CatalogEntry,
         library_entry::{date_based_path, original_date, read_exif, LibraryEntry},
     };
 

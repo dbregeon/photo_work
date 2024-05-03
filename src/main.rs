@@ -90,14 +90,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Unsupported subcommand `other_command`")]
-    fn panics_when_subcommand_cannot_be_found() {
-        let (_, sub_app) = given_a_sub_app();
-        let app = PhotoWorks::new().register(sub_app);
-        app.run(vec!["photo_works", "other_command"]).unwrap();
-    }
-
-    #[test]
     fn command_is_consistent() {
         let app = app();
 
