@@ -66,25 +66,16 @@ mod tests {
     use eyre::eyre;
     use std::path::PathBuf;
 
-    use rusqlite::{params, Connection};
+    use rusqlite::params;
 
     use crate::database::{
         library::{library_insert_all, LibraryEntry},
-        test_utils::{new_connection, new_database, new_database_containing_library_entries},
+        test_utils::{
+            library_contains, new_connection, new_database, new_database_containing_library_entries,
+        },
     };
 
     use super::{foreach_entry, persist_library_entries};
-
-    fn library_contains(connection: &mut Connection, entry: &LibraryEntry) -> bool {
-        match connection.query_row(
-            "SELECT true FROM library WHERE hash = ?1 AND path = ?2",
-            params!(entry.sha256(), entry.path().to_string_lossy().to_string()),
-            |row| row.get::<_, bool>(0),
-        ) {
-            Ok(b) => b,
-            Err(_) => false,
-        }
-    }
 
     fn some_entries() -> Vec<LibraryEntry> {
         vec![
