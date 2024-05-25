@@ -10,6 +10,9 @@ pub(crate) mod common;
 pub(crate) mod library;
 pub(crate) mod library_entry;
 
+#[cfg(test)]
+pub(crate) mod test_utils;
+
 mod embedded {
     use refinery::embed_migrations;
     embed_migrations!("./migrations");

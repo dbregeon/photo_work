@@ -107,7 +107,15 @@ fn check_catalog_duplicates(connection: &Connection) -> Result<()> {
             catalog_check_start.elapsed().as_secs(),
             result
                 .iter()
-                .map(|c| format!("{}: {}", c.sha256(), c.path().to_string_lossy().to_string()))
+                .map(|(key, values)| format!(
+                    "{}:\n{}",
+                    key,
+                    values
+                        .iter()
+                        .map(|e| e.path().to_string_lossy().to_string())
+                        .collect::<Vec<String>>()
+                        .join("\n")
+                ))
                 .collect::<Vec<String>>()
                 .join("\n")
         ))

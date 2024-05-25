@@ -70,7 +70,7 @@ mod tests {
 
     use crate::database::{
         library::{library_insert_all, LibraryEntry},
-        migrate,
+        test_utils::{new_connection, new_database, new_database_containing_library_entries},
     };
 
     use super::{foreach_entry, persist_library_entries};
@@ -84,24 +84,6 @@ mod tests {
             Ok(b) => b,
             Err(_) => false,
         }
-    }
-
-    fn new_database() -> Connection {
-        let mut connection = new_connection();
-        migrate(&mut connection).unwrap();
-        connection
-    }
-
-    fn new_connection() -> Connection {
-        Connection::open_in_memory().unwrap()
-    }
-
-    fn new_database_containing(entries: &Vec<LibraryEntry>) -> Connection {
-        let mut connection = new_database();
-        let mut transaction = connection.transaction().unwrap();
-        let _count = library_insert_all(&mut transaction, entries).unwrap();
-        transaction.commit().unwrap();
-        connection
     }
 
     fn some_entries() -> Vec<LibraryEntry> {
@@ -194,7 +176,7 @@ mod tests {
     #[test]
     fn foreach_entry_applies_the_function_to_each_entry() {
         let entries = some_entries();
-        let mut connection = new_database_containing(&entries);
+        let mut connection = new_database_containing_library_entries(&entries);
         let mut entry_hashes = vec![];
         let iterated_count = foreach_entry(&mut connection, |e| {
             entry_hashes.push(e.sha256().to_owned());
@@ -219,7 +201,7 @@ mod tests {
 
     #[test]
     fn foreach_entry_returns_error_when_parameter_function_does() {
-        let connection = new_database_containing(&some_entries());
+        let connection = new_database_containing_library_entries(&some_entries());
         assert_eq!(
             "invalid entry",
             foreach_entry(&connection, |e| if e.sha256() == "1" {

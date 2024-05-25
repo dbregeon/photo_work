@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use eyre::{eyre, Result};
 use rusqlite::{params, Connection, Params, Statement, Transaction};
 
@@ -40,9 +42,18 @@ pub(crate) fn select_from_catalog(
     query(&mut statement, params!([path_prefix, "%"].join("")))
 }
 
-pub(crate) fn find_duplicates(connection: &Connection) -> Result<Vec<CatalogEntry>> {
+pub(crate) fn find_duplicates(
+    connection: &Connection,
+) -> Result<HashMap<String, Vec<CatalogEntry>>> {
     let mut statement = connection.prepare("SELECT catalog.hash, catalog.path FROM catalog WHERE catalog.hash in (SELECT hash FROM catalog GROUP BY hash HAVING COUNT(path) > 1 ORDER BY hash)")?;
-    query(&mut statement, [])
+    Ok(query(&mut statement, [])?
+        .into_iter()
+        .fold(HashMap::new(), |mut map, e| {
+            map.entry(e.sha256.to_string())
+                .or_insert_with(|| Vec::new())
+                .push(e);
+            map
+        }))
 }
 
 pub(crate) fn foreach_entry<F>(connection: &Connection, mut f: F) -> Result<usize>
@@ -81,50 +92,62 @@ fn query<T: Params>(statement: &mut Statement, params: T) -> Result<Vec<CatalogE
     Ok(result)
 }
 
+pub(crate) fn remove_catalog_entries(
+    connection: &mut Connection,
+    entries: &Vec<CatalogEntry>,
+) -> Result<usize> {
+    let mut transaction = connection.transaction()?;
+    let count = catalog_remove_all(&mut transaction, entries)?;
+    assert!(count == entries.len());
+    transaction.commit()?;
+    Ok(count)
+}
+
+fn catalog_remove_all(transaction: &mut Transaction, entries: &[CatalogEntry]) -> Result<usize> {
+    let mut count = 0;
+    let mut statement = transaction.prepare("DELETE FROM catalog WHERE hash = ?1 AND path = ?2")?;
+    for entry in entries {
+        count += catalog_remove(&mut statement, entry)?;
+    }
+    Ok(count)
+}
+
+fn catalog_remove(
+    statement: &mut Statement,
+    CatalogEntry { sha256, path }: &CatalogEntry,
+) -> Result<usize> {
+    let count = statement
+        .execute([sha256, path])
+        .map_err(|e| eyre!("Failed to remove ({}, {}): {}", sha256, path, e))?;
+    if count == 0 {
+        Err(eyre!("Failed to remove ({}, {})", sha256, path))
+    } else {
+        Ok(count)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use eyre::eyre;
-    use rusqlite::{params, Connection};
+    use rusqlite::params;
 
     use crate::database::{
-        catalog::{catalog_insert_all, foreach_entry, query},
+        catalog::{
+            catalog_insert_all, catalog_remove_all, foreach_entry, query, remove_catalog_entries,
+        },
         library::persist_library_entries,
         library_entry::LibraryEntry,
-        migrate,
+        test_utils::{
+            catalog_contains, new_connection, new_database, new_database_containing_catalog_entries,
+        },
     };
 
     use super::{
-        find_already_imported, persist_catalog_entries, select_from_catalog, CatalogEntry,
+        find_already_imported, find_duplicates, persist_catalog_entries, select_from_catalog,
+        CatalogEntry,
     };
-
-    fn catalog_contains(connection: &mut Connection, entry: &CatalogEntry) -> bool {
-        match connection.query_row(
-            "SELECT true FROM catalog WHERE hash = ?1 AND path = ?2",
-            params!(entry.sha256, entry.path),
-            |row| row.get::<_, bool>(0),
-        ) {
-            Ok(b) => b,
-            Err(_) => false,
-        }
-    }
-
-    fn new_database() -> Connection {
-        let mut connection = new_connection();
-        migrate(&mut connection).unwrap();
-        connection
-    }
-
-    fn new_connection() -> Connection {
-        Connection::open_in_memory().unwrap()
-    }
-
-    fn new_database_containing(entries: &Vec<CatalogEntry>) -> Connection {
-        let mut connection = new_database();
-        let _count = persist_catalog_entries(&mut connection, entries);
-        connection
-    }
 
     fn some_entries() -> Vec<CatalogEntry> {
         vec![
@@ -258,7 +281,7 @@ mod tests {
     fn foreach_entry_applies_the_function_to_each_entry() {
         let entries = some_entries();
 
-        let mut connection = new_database_containing(&entries);
+        let mut connection = new_database_containing_catalog_entries(&entries);
         let mut entry_hashes = vec![];
         let iterated_count = foreach_entry(&mut connection, |e| {
             entry_hashes.push(e.sha256().to_owned());
@@ -273,7 +296,7 @@ mod tests {
     fn foreach_entry_returns_error_when_parameter_function_does() {
         let entries = some_entries();
 
-        let connection = new_database_containing(&entries);
+        let connection = new_database_containing_catalog_entries(&entries);
         assert_eq!(
             "invalid entry",
             foreach_entry(&connection, |e| if e.sha256() == "1" {
@@ -330,7 +353,7 @@ mod tests {
             "c/cc".to_string(),
         ));
 
-        let mut connection = new_database_containing(&entries);
+        let mut connection = new_database_containing_catalog_entries(&entries);
         persist_library_entries(
             &mut connection,
             &vec![LibraryEntry::new(
@@ -350,7 +373,7 @@ mod tests {
     fn find_already_imported_does_not_return_catalog_entries_with_no_matching_library_entries() {
         let entries = some_entries();
 
-        let mut connection = new_database_containing(&entries);
+        let mut connection = new_database_containing_catalog_entries(&entries);
         persist_library_entries(
             &mut connection,
             &vec![LibraryEntry::new("12".to_string(), PathBuf::from("a/aa"))],
@@ -358,5 +381,67 @@ mod tests {
         .unwrap();
 
         assert!(find_already_imported(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn find_duplicates_retuns_duplicates_grouped_together() {
+        let mut entries = some_entries();
+        entries.push(CatalogEntry::new(
+            entries[0].sha256.to_owned(),
+            "c/cc".to_string(),
+        ));
+
+        let connection = new_database_containing_catalog_entries(&entries);
+
+        let dupes = find_duplicates(&connection).unwrap();
+
+        assert_eq!(1, dupes.len());
+        assert_eq!(2, dupes.get(&entries[0].sha256).unwrap().len());
+        assert_eq!(entries[0], dupes.get(&entries[0].sha256).unwrap()[0]);
+        assert_eq!(entries[2], dupes.get(&entries[0].sha256).unwrap()[1]);
+    }
+
+    #[test]
+    fn catalog_remove_all_returns_count_of_deletions() {
+        let entries = some_entries();
+        let mut connection: rusqlite::Connection =
+            new_database_containing_catalog_entries(&entries);
+        let mut transaction = connection.transaction().unwrap();
+
+        assert_eq!(
+            entries.len(),
+            catalog_remove_all(&mut transaction, &entries).unwrap()
+        );
+    }
+
+    #[test]
+    fn catalog_remove_all_deletes_from_the_catalog_table() {
+        let entries = some_entries();
+
+        let mut connection: rusqlite::Connection =
+            new_database_containing_catalog_entries(&entries);
+        let mut transaction = connection.transaction().unwrap();
+
+        catalog_remove_all(&mut transaction, &entries).unwrap();
+        transaction.commit().unwrap();
+
+        assert!(!catalog_contains(&mut connection, &entries[0]));
+        assert!(!catalog_contains(&mut connection, &entries[1]));
+    }
+
+    #[test]
+    fn remove_catalog_entries_rollbacks_on_error() {
+        let entries = some_entries();
+        let inserted_entries = some_entries()
+            .into_iter()
+            .skip(1)
+            .collect::<Vec<CatalogEntry>>();
+        let mut connection = new_database_containing_catalog_entries(&inserted_entries);
+        let result = remove_catalog_entries(&mut connection, &entries);
+        assert!(catalog_contains(&mut connection, &inserted_entries[0]));
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "Failed to remove (1, a/a)".to_string()
+        );
     }
 }
