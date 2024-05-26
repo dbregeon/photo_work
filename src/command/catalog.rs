@@ -49,10 +49,10 @@ fn catalog(mut connection: Connection, path: &PathBuf) -> Result<usize> {
     let entries = WalkDir::new(&PathBuf::from(path))
         .into_iter()
         .filter_entry(|e| !is_hidden_file_name(e.file_name()))
-        .filter_map(|e| e.ok())
-        .map(|dir_entry| {
-            let entry_path = &dir_entry.into_path();
-            let catalog_entry = entry_path.try_into();
+        .filter_map(|e| e.ok().map(|f| f.into_path()))
+        .filter(|p| p.is_file())
+        .map(|entry_path| {
+            let catalog_entry = (&entry_path).try_into();
             if catalog_entry.is_err() {
                 println!("Failed to process {}", entry_path.display())
             }
